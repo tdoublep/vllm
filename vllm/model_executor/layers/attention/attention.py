@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.model_executor.input_metadata import InputMetadata
-# from vllm.utils import is_hip
+from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -50,7 +50,7 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if False and _use_flash_attn():
+        if _use_flash_attn():
             from vllm.model_executor.layers.attention.backends.flash_attn import FlashAttentionBackend  # noqa: E501
             self.backend = FlashAttentionBackend(num_heads, head_size, scale,
                                                  num_kv_heads, alibi_slopes,
