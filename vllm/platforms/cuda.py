@@ -199,6 +199,10 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using ROCm Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends.rocm_attn."
                         "ROCmAttentionBackend")
+            if os.environ.get("NGL_VLLM_V1_USE_ORIG_ROCM_BACKEND", "0") == "1":
+                logger.info_once("Using ORIGINAL ROCm Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends.orig_rocm_attn."
+                        "ROCmAttentionBackend")
             logger.info_once("Using Flash Attention backend on V1 engine.")
             return ("vllm.v1.attention.backends.flash_attn."
                     "FlashAttentionBackend")
