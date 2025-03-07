@@ -10,6 +10,7 @@ from vllm.platforms import current_platform
 def cdiv_fn(x, y):
     return (x + y - 1) // y
 
+@triton.jit
 def prefix_prefill_fwd_3d(
     Q,
     K,
@@ -22,6 +23,7 @@ def prefix_prefill_fwd_3d(
     v_scale,
     B_Start_Loc,
     B_Seqlen,
+    Alibi_slopes,
     block_size,
     x,
     Out,
@@ -50,12 +52,12 @@ def prefix_prefill_fwd_3d(
     stride_v_cache_bl,
     num_queries_per_kv: int,
     IN_PRECISION: tl.constexpr,
-    BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,  # head size
     BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
-    BLOCK_N: tl.constexpr,
+    USE_ALIBI_SLOPES: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,
-    SKIP_DECODE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_M: tl.constexpr,
 ):
 
     cur_batch = tl.program_id(0)
@@ -70,9 +72,6 @@ def prefix_prefill_fwd_3d(
     cur_batch_query_len = (cur_batch_in_all_stop_index -
                            cur_batch_in_all_start_index)
     cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
-
-    if SKIP_DECODE and cur_batch_query_len == 1:
-        return
 
     # start position inside of the query
     # generally, N goes over kv, while M goes over query_len
@@ -104,6 +103,13 @@ def prefix_prefill_fwd_3d(
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)  # [M]
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED],
                    dtype=tl.float32)  # [M,D]
+    
+    # init alibi (decode phase)
+    if USE_ALIBI_SLOPES:
+        alibi_slope = tl.load(Alibi_slopes + cur_head)
+        alibi_start_q = tl.arange(
+            0, BLOCK_M) + block_start_loc + cur_batch_ctx_len
+        alibi_start_k = 0
 
     # compute query against context (no causal mask here)
     for start_n in range(0, cur_batch_ctx_len, BLOCK_N):
@@ -141,6 +147,16 @@ def prefix_prefill_fwd_3d(
         qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
                       float("-inf"))
         qk *= sm_scale
+
+        if USE_ALIBI_SLOPES:
+            alibi = (tl.arange(0, BLOCK_N)[None, :] + alibi_start_k -
+                     alibi_start_q[:, None]) * alibi_slope
+            alibi = tl.where(
+                (alibi <= 0) & (alibi_start_q[:, None] < cur_batch_seq_len),
+                alibi, float("-inf"))
+            qk += alibi
+            alibi_start_k += BLOCK_N
+
         if SLIDING_WINDOW > 0:
             # (cur_batch_ctx_len + offs_m[:, None]) are the positions of
             # Q entries in sequence
@@ -199,6 +215,10 @@ def prefix_prefill_fwd_3d(
 
     # block_mask is 0 when we're already past the current query length
     block_mask = tl.where(block_start_loc < cur_batch_query_len, 1, 0)
+    
+    # init alibi (prefill phase)
+    if USE_ALIBI_SLOPES:
+        alibi_start_k = cur_batch_ctx_len
 
     # compute query against itself (with causal mask)
     for start_n in range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N):
@@ -216,6 +236,16 @@ def prefix_prefill_fwd_3d(
         # apply causal mask
         qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk,
                       float("-inf"))
+
+        if USE_ALIBI_SLOPES:
+            alibi = (tl.arange(0, BLOCK_N)[None, :] + alibi_start_k -
+                     alibi_start_q[:, None]) * alibi_slope
+            alibi = tl.where(
+                (alibi <= 0) & (alibi_start_q[:, None] < cur_batch_seq_len),
+                alibi, float("-inf"))
+            qk += alibi
+            alibi_start_k += BLOCK_N
+
         if SLIDING_WINDOW > 0:
             qk = tl.where(
                 offs_m[:, None] - (start_n + offs_n[None, :])
@@ -491,6 +521,7 @@ def fused_chunked_prefill_kernel_25d(
             v_scale,
             query_start_len_ptr,
             seq_lens_ptr,
+            alibi_slopes_ptr,
             BLOCK_SIZE,
             x,
             output_ptr,
@@ -519,11 +550,12 @@ def fused_chunked_prefill_kernel_25d(
             stride_v_cache_3,
             num_queries_per_kv=num_queries_per_kv,
             IN_PRECISION=IN_PRECISION, 
-            BLOCK_M=BLOCK_M,
             BLOCK_DMODEL=HEAD_SIZE,
             BLOCK_DMODEL_PADDED=HEAD_SIZE_PADDED, # head size padded to a power of 2
-            BLOCK_N=BLOCK_N,
+            USE_ALIBI_SLOPES=USE_ALIBI_SLOPES,
             SLIDING_WINDOW=SLIDING_WINDOW,
+            BLOCK_N=BLOCK_N,
+            BLOCK_M=BLOCK_M,
         )
 
     # from here, we continue as 2d
@@ -630,10 +662,6 @@ def fused_chunked_prefill_paged_decode(
     # implementation
     IN_PRECISION = 'ieee' if IS_TURING and q_dtype_is_f32 else None
 
-        # TODO: for now...
-    assert alibi_slopes is not None
-
-
     block_size = value_cache.shape[3]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
@@ -663,6 +691,7 @@ def fused_chunked_prefill_paged_decode(
         scale=sm_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        max_query_len=max_query_len,
         num_query_heads=num_query_heads,
         num_queries_per_kv=num_queries_per_kv,
         block_table_stride_0=block_table.stride(0),
@@ -688,6 +717,12 @@ def fused_chunked_prefill_paged_decode(
         stride_v_cache_1=value_cache.stride(1),
         stride_v_cache_2=value_cache.stride(2),
         stride_v_cache_3=value_cache.stride(3),
+        stride_k_0=key.stride(0),
+        stride_k_1=key.stride(1),
+        stride_k_2=key.stride(2),
+        stride_v_0=value.stride(0),
+        stride_v_1=value.stride(1),
+        stride_v_2=value.stride(2),
         query_start_len_ptr=query_start_loc,
         IN_PRECISION=IN_PRECISION,
         BLOCK_M=BLOCK,
