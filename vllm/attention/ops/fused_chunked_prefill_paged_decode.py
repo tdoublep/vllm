@@ -6,9 +6,11 @@ import triton.language as tl
 
 from vllm.platforms import current_platform
 
+
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
+
 
 @triton.jit
 def prefix_prefill_fwd_3d(
@@ -69,8 +71,7 @@ def prefix_prefill_fwd_3d(
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
     cur_batch_in_all_stop_index = tl.load(B_Start_Loc + cur_batch + 1)
-    cur_batch_query_len = (cur_batch_in_all_stop_index -
-                           cur_batch_in_all_start_index)
+    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
     cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
 
     # start position inside of the query
@@ -86,56 +87,63 @@ def prefix_prefill_fwd_3d(
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     # [M,D]
     off_q = (
-        (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs +
-        cur_head * stride_qh + offs_d[None, :] * stride_qd)
+        (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
+        + cur_head * stride_qh
+        + offs_d[None, :] * stride_qd
+    )
 
-    dim_mask = tl.where(
-        tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1,
-        0).to(tl.int1)  # [D]
+    dim_mask = tl.where(tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1, 0).to(
+        tl.int1
+    )  # [D]
 
-    q = tl.load(Q + off_q,
-                mask=dim_mask[None, :] &
-                (offs_m[:, None] < cur_batch_query_len),
-                other=0.0)  # [M,D]
+    q = tl.load(
+        Q + off_q,
+        mask=dim_mask[None, :] & (offs_m[:, None] < cur_batch_query_len),
+        other=0.0,
+    )  # [M,D]
 
     # initialize pointer to m and l
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")  # [M]
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)  # [M]
-    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED],
-                   dtype=tl.float32)  # [M,D]
-    
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
+
     # init alibi (decode phase)
     if USE_ALIBI_SLOPES:
         alibi_slope = tl.load(Alibi_slopes + cur_head)
-        alibi_start_q = tl.arange(
-            0, BLOCK_M) + block_start_loc + cur_batch_ctx_len
+        alibi_start_q = tl.arange(0, BLOCK_M) + block_start_loc + cur_batch_ctx_len
         alibi_start_k = 0
 
     # compute query against context (no causal mask here)
     for start_n in range(0, cur_batch_ctx_len, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        bn = tl.load(B_Loc + cur_batch * stride_b_loc_b +
-                     ((start_n + offs_n) // block_size) * stride_b_loc_s,
-                     mask=(start_n + offs_n) < cur_batch_ctx_len,
-                     other=0)  # [N]
+        bn = tl.load(
+            B_Loc
+            + cur_batch * stride_b_loc_b
+            + ((start_n + offs_n) // block_size) * stride_b_loc_s,
+            mask=(start_n + offs_n) < cur_batch_ctx_len,
+            other=0,
+        )  # [N]
         # [D,N]
-        off_k = (bn[None, :] * stride_k_cache_bs +
-                 cur_kv_head * stride_k_cache_h +
-                 (offs_d[:, None] // x) * stride_k_cache_d +
-                 ((start_n + offs_n[None, :]) % block_size) *
-                 stride_k_cache_bl +
-                 (offs_d[:, None] % x) * stride_k_cache_x)
+        off_k = (
+            bn[None, :] * stride_k_cache_bs
+            + cur_kv_head * stride_k_cache_h
+            + (offs_d[:, None] // x) * stride_k_cache_d
+            + ((start_n + offs_n[None, :]) % block_size) * stride_k_cache_bl
+            + (offs_d[:, None] % x) * stride_k_cache_x
+        )
         # [N,D]
         off_v = (
-            bn[:, None] * stride_v_cache_bs +
-            cur_kv_head * stride_v_cache_h +
-            offs_d[None, :] * stride_v_cache_d +
-            (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl)
-        k_load = tl.load(K_cache + off_k,
-                         mask=dim_mask[:, None] &
-                         ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
-                         other=0.0)  # [D,N]
+            bn[:, None] * stride_v_cache_bs
+            + cur_kv_head * stride_v_cache_h
+            + offs_d[None, :] * stride_v_cache_d
+            + (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl
+        )
+        k_load = tl.load(
+            K_cache + off_k,
+            mask=dim_mask[:, None] & ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
+            other=0.0,
+        )  # [D,N]
 
         if k_load.dtype.is_fp8():
             k = (k_load.to(tl.float32) * tl.load(k_scale)).to(q.dtype)
@@ -144,16 +152,20 @@ def prefix_prefill_fwd_3d(
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  # [M,N]
         qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
-        qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
-                      float("-inf"))
+        qk = tl.where(
+            (start_n + offs_n[None, :]) < cur_batch_ctx_len, qk, float("-inf")
+        )
         qk *= sm_scale
 
         if USE_ALIBI_SLOPES:
-            alibi = (tl.arange(0, BLOCK_N)[None, :] + alibi_start_k -
-                     alibi_start_q[:, None]) * alibi_slope
+            alibi = (
+                tl.arange(0, BLOCK_N)[None, :] + alibi_start_k - alibi_start_q[:, None]
+            ) * alibi_slope
             alibi = tl.where(
                 (alibi <= 0) & (alibi_start_q[:, None] < cur_batch_seq_len),
-                alibi, float("-inf"))
+                alibi,
+                float("-inf"),
+            )
             qk += alibi
             alibi_start_k += BLOCK_N
 
@@ -169,9 +181,12 @@ def prefix_prefill_fwd_3d(
             # sliding window may lead to the entire row being masked.
             # This then makes m_ij contain -inf, which causes NaNs in
             # exp().
-            qk = tl.where((cur_batch_ctx_len + offs_m[:, None]) -
-                          (start_n + offs_n[None, :]) < SLIDING_WINDOW, qk,
-                          -10000)
+            qk = tl.where(
+                (cur_batch_ctx_len + offs_m[:, None]) - (start_n + offs_n[None, :])
+                < SLIDING_WINDOW,
+                qk,
+                -10000,
+            )
 
         # -- compute m_ij, p, l_ij
         m_ij = tl.max(qk, 1)  # [M]
@@ -191,10 +206,11 @@ def prefix_prefill_fwd_3d(
         acc_scale = l_i / l_i_new * alpha
         acc = acc * acc_scale[:, None]
         # update acc
-        v_load = tl.load(V_cache + off_v,
-                         mask=dim_mask[None, :] &
-                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
-                         other=0.0)  # [N,D]
+        v_load = tl.load(
+            V_cache + off_v,
+            mask=dim_mask[None, :] & ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
+            other=0.0,
+        )  # [N,D]
         if v_load.dtype.is_fp8():
             v = (v_load.to(tl.float32) * tl.load(v_scale)).to(q.dtype)
         else:
@@ -206,16 +222,22 @@ def prefix_prefill_fwd_3d(
         l_i = l_i_new
         m_i = m_i_new
 
-    off_k = (offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh +
-             offs_d[:, None] * stride_kd)
-    off_v = (offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh +
-             offs_d[None, :] * stride_vd)
+    off_k = (
+        offs_n[None, :] * stride_kbs
+        + cur_kv_head * stride_kh
+        + offs_d[:, None] * stride_kd
+    )
+    off_v = (
+        offs_n[:, None] * stride_vbs
+        + cur_kv_head * stride_vh
+        + offs_d[None, :] * stride_vd
+    )
     k_ptrs = K + off_k
     v_ptrs = V + off_v
 
     # block_mask is 0 when we're already past the current query length
     block_mask = tl.where(block_start_loc < cur_batch_query_len, 1, 0)
-    
+
     # init alibi (prefill phase)
     if USE_ALIBI_SLOPES:
         alibi_start_k = cur_batch_ctx_len
@@ -224,32 +246,37 @@ def prefix_prefill_fwd_3d(
     for start_n in range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        k = tl.load(k_ptrs +
-                    (cur_batch_in_all_start_index + start_n) * stride_kbs,
-                    mask=dim_mask[:, None] &
-                    ((start_n + offs_n[None, :]) < cur_batch_query_len),
-                    other=0.0)
+        k = tl.load(
+            k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+            mask=dim_mask[:, None]
+            & ((start_n + offs_n[None, :]) < cur_batch_query_len),
+            other=0.0,
+        )
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
         qk *= sm_scale
         # apply causal mask
-        qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk,
-                      float("-inf"))
+        qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
 
         if USE_ALIBI_SLOPES:
-            alibi = (tl.arange(0, BLOCK_N)[None, :] + alibi_start_k -
-                     alibi_start_q[:, None]) * alibi_slope
+            alibi = (
+                tl.arange(0, BLOCK_N)[None, :] + alibi_start_k - alibi_start_q[:, None]
+            ) * alibi_slope
             alibi = tl.where(
                 (alibi <= 0) & (alibi_start_q[:, None] < cur_batch_seq_len),
-                alibi, float("-inf"))
+                alibi,
+                float("-inf"),
+            )
             qk += alibi
             alibi_start_k += BLOCK_N
 
         if SLIDING_WINDOW > 0:
             qk = tl.where(
-                offs_m[:, None] - (start_n + offs_n[None, :])
-                < SLIDING_WINDOW, qk, -10000)
+                offs_m[:, None] - (start_n + offs_n[None, :]) < SLIDING_WINDOW,
+                qk,
+                -10000,
+            )
 
         # -- compute m_ij, p, l_ij
         m_ij = tl.max(qk, 1)
@@ -268,11 +295,12 @@ def prefix_prefill_fwd_3d(
         acc_scale = l_i / l_i_new * alpha
         acc = acc * acc_scale[:, None]
         # update acc
-        v = tl.load(v_ptrs +
-                    (cur_batch_in_all_start_index + start_n) * stride_vbs,
-                    mask=dim_mask[None, :] &
-                    ((start_n + offs_n[:, None]) < cur_batch_query_len),
-                    other=0.0)
+        v = tl.load(
+            v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
+            mask=dim_mask[None, :]
+            & ((start_n + offs_n[:, None]) < cur_batch_query_len),
+            other=0.0,
+        )
         p = p.to(v.dtype)
 
         acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
@@ -281,68 +309,68 @@ def prefix_prefill_fwd_3d(
         m_i = m_i_new
     # initialize pointers to output
     off_o = (
-        (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs +
-        cur_head * stride_oh + offs_d[None, :] * stride_od)
+        (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
+        + cur_head * stride_oh
+        + offs_d[None, :] * stride_od
+    )
     out_ptrs = Out + off_o
-    tl.store(out_ptrs,
-             acc,
-             mask=dim_mask[None, :] &
-             (offs_m[:, None] < cur_batch_query_len))
+    tl.store(
+        out_ptrs, acc, mask=dim_mask[None, :] & (offs_m[:, None] < cur_batch_query_len)
+    )
     return
+
 
 @triton.jit
 def kernel_paged_attention_2d(
-        output_ptr,  # [num_tokens, num_query_heads, head_size]
-        query_ptr,  # [num_tokens, num_query_heads, head_size]
-        key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
-        value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
-        block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-        seq_lens_ptr,  # [num_seqs]
-        alibi_slopes_ptr,  # [num_query_heads]
-        scale,  # float32
-        k_scale,  # float32
-        v_scale,  # float32
-        num_query_heads: tl.constexpr,  # int
-        num_queries_per_kv: tl.constexpr,  # int
-        block_table_stride: tl.constexpr,  # int
-        query_stride_0: tl.constexpr,  # int
-        query_stride_1: tl.constexpr,  # int, should be equal to head_size
-        output_stride_0: tl.constexpr,  # int
-        output_stride_1: tl.constexpr,  # int, should be equal to head_size
-        BLOCK_SIZE: tl.constexpr,  # int
-        HEAD_SIZE: tl.constexpr,  # int
-        HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
-        USE_ALIBI_SLOPES: tl.constexpr,  # bool
-        SLIDING_WINDOW: tl.constexpr,  # int
-        x: tl.constexpr,  # int
-        stride_k_cache_0: tl.constexpr,  # int
-        stride_k_cache_1: tl.constexpr,  # int
-        stride_k_cache_2: tl.constexpr,  # int
-        stride_k_cache_3: tl.constexpr,  # int
-        stride_k_cache_4: tl.constexpr,  # int
-        stride_v_cache_0: tl.constexpr,  # int
-        stride_v_cache_1: tl.constexpr,  # int
-        stride_v_cache_2: tl.constexpr,  # int
-        stride_v_cache_3: tl.constexpr,  # int
-        query_start_len_ptr,  # [num_seqs+1]
+    output_ptr,  # [num_tokens, num_query_heads, head_size]
+    query_ptr,  # [num_tokens, num_query_heads, head_size]
+    key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
+    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
+    seq_lens_ptr,  # [num_seqs]
+    alibi_slopes_ptr,  # [num_query_heads]
+    scale,  # float32
+    k_scale,  # float32
+    v_scale,  # float32
+    num_query_heads: tl.constexpr,  # int
+    num_queries_per_kv: tl.constexpr,  # int
+    block_table_stride: tl.constexpr,  # int
+    query_stride_0: tl.constexpr,  # int
+    query_stride_1: tl.constexpr,  # int, should be equal to head_size
+    output_stride_0: tl.constexpr,  # int
+    output_stride_1: tl.constexpr,  # int, should be equal to head_size
+    BLOCK_SIZE: tl.constexpr,  # int
+    HEAD_SIZE: tl.constexpr,  # int
+    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
+    USE_ALIBI_SLOPES: tl.constexpr,  # bool
+    SLIDING_WINDOW: tl.constexpr,  # int
+    x: tl.constexpr,  # int
+    stride_k_cache_0: tl.constexpr,  # int
+    stride_k_cache_1: tl.constexpr,  # int
+    stride_k_cache_2: tl.constexpr,  # int
+    stride_k_cache_3: tl.constexpr,  # int
+    stride_k_cache_4: tl.constexpr,  # int
+    stride_v_cache_0: tl.constexpr,  # int
+    stride_v_cache_1: tl.constexpr,  # int
+    stride_v_cache_2: tl.constexpr,  # int
+    stride_v_cache_3: tl.constexpr,  # int
+    query_start_len_ptr,  # [num_seqs+1]
 ):
     seq_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
     kv_head_idx = query_head_idx // num_queries_per_kv
 
     cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
-    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx +
-                                          1)
-    cur_batch_query_len = cur_batch_in_all_stop_index \
-        - cur_batch_in_all_start_index
+    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
+    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
     if cur_batch_query_len > 1:
         return
 
-    query_offset = (cur_batch_in_all_start_index * query_stride_0 +
-                    query_head_idx * query_stride_1)
+    query_offset = (
+        cur_batch_in_all_start_index * query_stride_0 + query_head_idx * query_stride_1
+    )
 
-    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1,
-                        0).to(tl.int1)
+    dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1, 0).to(tl.int1)
 
     # Q : (HEAD_SIZE,)
     Q = tl.load(
@@ -374,21 +402,23 @@ def kernel_paged_attention_2d(
         offs_n = tl.arange(0, BLOCK_SIZE)
         offs_d = tl.arange(0, HEAD_SIZE_PADDED)
 
-        v_offset = (physical_block_idx * stride_v_cache_0 +
-                    kv_head_idx * stride_v_cache_1 +
-                    offs_d[:, None] * stride_v_cache_2 +
-                    offs_n[None, :] * stride_v_cache_3)
+        v_offset = (
+            physical_block_idx * stride_v_cache_0
+            + kv_head_idx * stride_v_cache_1
+            + offs_d[:, None] * stride_v_cache_2
+            + offs_n[None, :] * stride_v_cache_3
+        )
 
-        k_offset = (physical_block_idx * stride_k_cache_0 +
-                    kv_head_idx * stride_k_cache_1 +
-                    (offs_d[:, None] // x) * stride_k_cache_2 +
-                    offs_n[None, :] * stride_k_cache_3 +
-                    (offs_d[:, None] % x) * stride_k_cache_4)
+        k_offset = (
+            physical_block_idx * stride_k_cache_0
+            + kv_head_idx * stride_k_cache_1
+            + (offs_d[:, None] // x) * stride_k_cache_2
+            + offs_n[None, :] * stride_k_cache_3
+            + (offs_d[:, None] % x) * stride_k_cache_4
+        )
 
         # K : (HEAD_SIZE, BLOCK_SIZE)
-        K_load = tl.load(key_cache_ptr + k_offset,
-                         mask=dim_mask[:, None],
-                         other=0.0)
+        K_load = tl.load(key_cache_ptr + k_offset, mask=dim_mask[:, None], other=0.0)
 
         if K_load.dtype.is_fp8():
             K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
@@ -396,9 +426,7 @@ def kernel_paged_attention_2d(
             K = K_load
 
         # V : (HEAD_SIZE, BLOCK_SIZE)
-        V_load = tl.load(value_cache_ptr + v_offset,
-                         mask=dim_mask[:, None],
-                         other=0.0)
+        V_load = tl.load(value_cache_ptr + v_offset, mask=dim_mask[:, None], other=0.0)
 
         if V_load.dtype.is_fp8():
             V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
@@ -444,64 +472,66 @@ def kernel_paged_attention_2d(
     # epilogue
     acc = acc / L
 
-    output_offset = (cur_batch_in_all_start_index * output_stride_0 +
-                     query_head_idx * output_stride_1)
+    output_offset = (
+        cur_batch_in_all_start_index * output_stride_0
+        + query_head_idx * output_stride_1
+    )
 
-    tl.store(output_ptr + output_offset + tl.arange(0, HEAD_SIZE_PADDED),
-             acc,
-             mask=dim_mask)
+    tl.store(
+        output_ptr + output_offset + tl.arange(0, HEAD_SIZE_PADDED), acc, mask=dim_mask
+    )
 
 
 @triton.jit
 def fused_chunked_prefill_kernel_25d(
-        output_ptr,  # [num_tokens, num_query_heads, head_size]
-        query_ptr,  # [num_tokens, num_query_heads, head_size]
-        key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
-        value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
-        block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-        key_ptr,
-        value_ptr,
-        seq_lens_ptr,  # [num_seqs]
-        alibi_slopes_ptr,  # [num_query_heads]
-        scale,  # float32
-        k_scale,  # float32
-        v_scale,  # float32
-        max_query_len, # int, not const!
-        num_query_heads: tl.constexpr,  # int
-        num_queries_per_kv: tl.constexpr,  # int
-        block_table_stride_0: tl.constexpr,  # int
-        block_table_stride_1: tl.constexpr,  # int
-        query_stride_0: tl.constexpr,  # int
-        query_stride_1: tl.constexpr,  # int, should be equal to head_size
-        query_stride_2: tl.constexpr,  # int
-        output_stride_0: tl.constexpr,  # int
-        output_stride_1: tl.constexpr,  # int, should be equal to head_size
-        output_stride_2: tl.constexpr,  # int
-        BLOCK_SIZE: tl.constexpr,  # int
-        HEAD_SIZE: tl.constexpr,  # int
-        HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
-        USE_ALIBI_SLOPES: tl.constexpr,  # bool
-        SLIDING_WINDOW: tl.constexpr,  # int
-        x: tl.constexpr,  # int
-        stride_k_cache_0: tl.constexpr,  # int
-        stride_k_cache_1: tl.constexpr,  # int
-        stride_k_cache_2: tl.constexpr,  # int
-        stride_k_cache_3: tl.constexpr,  # int
-        stride_k_cache_4: tl.constexpr,  # int
-        stride_v_cache_0: tl.constexpr,  # int
-        stride_v_cache_1: tl.constexpr,  # int
-        stride_v_cache_2: tl.constexpr,  # int
-        stride_v_cache_3: tl.constexpr,  # int
-        stride_k_0: tl.constexpr,  # int
-        stride_k_1: tl.constexpr,  # int
-        stride_k_2: tl.constexpr,  # int
-        stride_v_0: tl.constexpr,  # int
-        stride_v_1: tl.constexpr,  # int
-        stride_v_2: tl.constexpr,  # int
-        query_start_len_ptr,  # [num_seqs+1]
-        IN_PRECISION: tl.constexpr,
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr,
+    output_ptr,  # [num_tokens, num_query_heads, head_size]
+    query_ptr,  # [num_tokens, num_query_heads, head_size]
+    key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
+    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
+    key_ptr,
+    value_ptr,
+    seq_lens_ptr,  # [num_seqs]
+    alibi_slopes_ptr,  # [num_query_heads]
+    scale,  # float32
+    k_scale,  # float32
+    v_scale,  # float32
+    max_query_len,  # int, not const!
+    num_query_heads: tl.constexpr,  # int
+    num_queries_per_kv: tl.constexpr,  # int
+    block_table_stride_0: tl.constexpr,  # int
+    block_table_stride_1: tl.constexpr,  # int
+    query_stride_0: tl.constexpr,  # int
+    query_stride_1: tl.constexpr,  # int, should be equal to head_size
+    query_stride_2: tl.constexpr,  # int
+    output_stride_0: tl.constexpr,  # int
+    output_stride_1: tl.constexpr,  # int, should be equal to head_size
+    output_stride_2: tl.constexpr,  # int
+    BLOCK_SIZE: tl.constexpr,  # int
+    HEAD_SIZE: tl.constexpr,  # int
+    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
+    USE_ALIBI_SLOPES: tl.constexpr,  # bool
+    SLIDING_WINDOW: tl.constexpr,  # int
+    x: tl.constexpr,  # int
+    stride_k_cache_0: tl.constexpr,  # int
+    stride_k_cache_1: tl.constexpr,  # int
+    stride_k_cache_2: tl.constexpr,  # int
+    stride_k_cache_3: tl.constexpr,  # int
+    stride_k_cache_4: tl.constexpr,  # int
+    stride_v_cache_0: tl.constexpr,  # int
+    stride_v_cache_1: tl.constexpr,  # int
+    stride_v_cache_2: tl.constexpr,  # int
+    stride_v_cache_3: tl.constexpr,  # int
+    stride_k_0: tl.constexpr,  # int
+    stride_k_1: tl.constexpr,  # int
+    stride_k_2: tl.constexpr,  # int
+    stride_v_0: tl.constexpr,  # int
+    stride_v_1: tl.constexpr,  # int
+    stride_v_2: tl.constexpr,  # int
+    query_start_len_ptr,  # [num_seqs+1]
+    IN_PRECISION: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
     seq_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -549,9 +579,9 @@ def fused_chunked_prefill_kernel_25d(
             stride_v_cache_2,
             stride_v_cache_3,
             num_queries_per_kv=num_queries_per_kv,
-            IN_PRECISION=IN_PRECISION, 
+            IN_PRECISION=IN_PRECISION,
             BLOCK_DMODEL=HEAD_SIZE,
-            BLOCK_DMODEL_PADDED=HEAD_SIZE_PADDED, # head size padded to a power of 2
+            BLOCK_DMODEL_PADDED=HEAD_SIZE_PADDED,  # head size padded to a power of 2
             USE_ALIBI_SLOPES=USE_ALIBI_SLOPES,
             SLIDING_WINDOW=SLIDING_WINDOW,
             BLOCK_N=BLOCK_N,
@@ -618,7 +648,7 @@ def fused_chunked_prefill_paged_decode(
 ):
 
     if sm_scale is None:
-        sm_scale = 1.0 / (query.shape[1]**0.5)
+        sm_scale = 1.0 / (query.shape[1] ** 0.5)
 
     use_alibi_slopes = alibi_slopes is not None
 
@@ -641,10 +671,15 @@ def fused_chunked_prefill_paged_decode(
 
         key_cache = key_cache.view(target_dtype)
         value_cache = value_cache.view(target_dtype)
-    if (key_cache.dtype == torch.uint8
-            or value_cache.dtype == torch.uint8 and kv_cache_dtype == "auto"):
-        raise ValueError("kv_cache_dtype='auto' unsupported for\
-            FP8 KV Cache prefill kernel")
+    if (
+        key_cache.dtype == torch.uint8
+        or value_cache.dtype == torch.uint8
+        and kv_cache_dtype == "auto"
+    ):
+        raise ValueError(
+            "kv_cache_dtype='auto' unsupported for\
+            FP8 KV Cache prefill kernel"
+        )
 
     BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
     NUM_WARPS = 4 if current_platform.is_rocm() else 8
@@ -660,21 +695,24 @@ def fused_chunked_prefill_paged_decode(
     # use ieee as fallback for triton kernels work. There is also
     # warning on vllm/config.py to inform users this fallback
     # implementation
-    IN_PRECISION = 'ieee' if IS_TURING and q_dtype_is_f32 else None
+    IN_PRECISION = "ieee" if IS_TURING and q_dtype_is_f32 else None
 
     block_size = value_cache.shape[3]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
     num_queries_per_kv = query.shape[1] // key.shape[1]
     head_size = query.shape[2]
-    
-    # unclear why prefix_prefill code has this, 
+
+    # unclear why prefix_prefill code has this,
     # it is not true for batch size = 1 and works nevertheless
     # assert num_seqs + 1 == len(block_table)
 
     # TODO: use autotuning...
-    grid = (num_seqs, num_query_heads, triton.cdiv(max_query_len, BLOCK))  # batch, head,
-
+    grid = (
+        num_seqs,
+        num_query_heads,
+        triton.cdiv(max_query_len, BLOCK),
+    )  # batch, head,
 
     # kernel_paged_attention_2d[(
     #     num_seqs,
