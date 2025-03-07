@@ -504,9 +504,9 @@ def fused_chunked_prefill_kernel_25d(
     value_ptr,
     seq_lens_ptr,  # [num_seqs]
     alibi_slopes_ptr,  # [num_query_heads]
-    scale,  # float32
-    k_scale,  # float32
-    v_scale,  # float32
+    scale,  # float32, could be constant?
+    k_scale,  # float32, could be constant?
+    v_scale,  # float32, could be constant?
     # max_query_len,  # int, not const!
     num_query_heads: tl.constexpr,  # int
     num_queries_per_kv: tl.constexpr,  # int
@@ -654,6 +654,11 @@ def fused_chunked_prefill_kernel_25d(
         )
 
 
+BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
+NUM_WARPS = 4 if current_platform.is_rocm() else 8
+# To check compatibility
+IS_TURING = current_platform.get_device_capability() == (7, 5)
+
 def fused_chunked_prefill_paged_decode(
     query,
     key,
@@ -707,10 +712,6 @@ def fused_chunked_prefill_paged_decode(
             FP8 KV Cache prefill kernel"
         )
 
-    BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
-    NUM_WARPS = 4 if current_platform.is_rocm() else 8
-    # To check compatibility
-    IS_TURING = current_platform.get_device_capability() == (7, 5)
     q_dtype_is_f32 = query.dtype is torch.float32
     # need to reduce num. blocks when using fp32
     # due to increased use of GPU shared memory
