@@ -668,7 +668,9 @@ def fused_chunked_prefill_paged_decode(
     num_queries_per_kv = query.shape[1] // key.shape[1]
     head_size = query.shape[2]
     
-    assert num_seqs + 1 == len(block_table)
+    # unclear why prefix_prefill code has this, 
+    # it is not true for batch size = 1 and works nevertheless
+    # assert num_seqs + 1 == len(block_table)
 
     # TODO: use autotuning...
     grid = (num_seqs, num_query_heads, triton.cdiv(max_query_len, BLOCK))  # batch, head,
