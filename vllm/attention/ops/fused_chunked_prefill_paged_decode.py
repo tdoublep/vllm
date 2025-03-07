@@ -23,6 +23,9 @@ def prefix_prefill_fwd_3d(
     sm_scale,
     k_scale,
     v_scale,
+    cur_batch, # int, tl.program_id(0)
+    cur_head, # int, tl.program_id(1)
+    start_m, # int, tl.program_id(2)
     cur_batch_in_all_start_index, # int
     cur_batch_in_all_stop_index, # int 
     cur_batch_query_len, # int
@@ -65,9 +68,9 @@ def prefix_prefill_fwd_3d(
     BLOCK_M: tl.constexpr,
 ):
 
-    cur_batch = tl.program_id(0)
-    cur_head = tl.program_id(1)
-    start_m = tl.program_id(2)
+    # cur_batch = tl.program_id(0)
+    # cur_head = tl.program_id(1)
+    # start_m = tl.program_id(2)
 
     cur_kv_head = cur_head // num_queries_per_kv
 
@@ -335,6 +338,8 @@ def kernel_paged_attention_2d(
     scale,  # float32
     k_scale,  # float32
     v_scale,  # float32
+    seq_idx,  # int, tl.program_id(0)
+    query_head_idx,  # int, tl.program_id(1)
     cur_batch_in_all_start_index, # int
     cur_batch_in_all_stop_index, # int 
     cur_batch_query_len, # int
@@ -360,10 +365,10 @@ def kernel_paged_attention_2d(
     stride_v_cache_1: tl.constexpr,  # int
     stride_v_cache_2: tl.constexpr,  # int
     stride_v_cache_3: tl.constexpr,  # int
-    query_start_len_ptr,  # [num_seqs+1]
+    # query_start_len_ptr,  # [num_seqs+1]
 ):
-    seq_idx = tl.program_id(0)
-    query_head_idx = tl.program_id(1)
+    # seq_idx = tl.program_id(0)
+    # query_head_idx = tl.program_id(1)
     kv_head_idx = query_head_idx // num_queries_per_kv
 
     # cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
@@ -502,7 +507,7 @@ def fused_chunked_prefill_kernel_25d(
     scale,  # float32
     k_scale,  # float32
     v_scale,  # float32
-    max_query_len,  # int, not const!
+    # max_query_len,  # int, not const!
     num_query_heads: tl.constexpr,  # int
     num_queries_per_kv: tl.constexpr,  # int
     block_table_stride_0: tl.constexpr,  # int
@@ -559,6 +564,9 @@ def fused_chunked_prefill_kernel_25d(
             scale,
             k_scale,
             v_scale,
+            seq_idx,
+            query_head_idx,
+            start_m,
             cur_batch_in_all_start_index,
             cur_batch_in_all_stop_index,
             cur_batch_query_len,
@@ -602,7 +610,7 @@ def fused_chunked_prefill_kernel_25d(
         )
     else:
         # from here, we continue as 2d
-        if start_m > 1:
+        if start_m > 0:
             return
         kernel_paged_attention_2d(
             output_ptr,
@@ -615,6 +623,8 @@ def fused_chunked_prefill_kernel_25d(
             scale,
             k_scale,
             v_scale,
+            seq_idx,
+            query_head_idx,
             cur_batch_in_all_start_index,
             cur_batch_in_all_stop_index,
             cur_batch_query_len,
@@ -640,7 +650,7 @@ def fused_chunked_prefill_kernel_25d(
             stride_v_cache_1,
             stride_v_cache_2,
             stride_v_cache_3,
-            query_start_len_ptr,
+            # query_start_len_ptr,
         )
 
 
@@ -747,7 +757,7 @@ def fused_chunked_prefill_paged_decode(
         scale=sm_scale,
         k_scale=k_scale,
         v_scale=v_scale,
-        max_query_len=max_query_len,
+        # max_query_len=max_query_len,
         num_query_heads=num_query_heads,
         num_queries_per_kv=num_queries_per_kv,
         block_table_stride_0=block_table.stride(0),
