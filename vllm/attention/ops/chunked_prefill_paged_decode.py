@@ -9,6 +9,7 @@
 import torch
 import triton
 import triton.language as tl
+import triton_dejavu
 
 from vllm import _custom_ops as ops
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
@@ -20,7 +21,10 @@ from .prefix_prefill import context_attention_fwd
 def cdiv_fn(x, y):
     return (x + y - 1) // y
 
-
+@triton_dejavu.jitcache(
+    cache_lock=None,
+    check_keys=["query_stride_0", "query_stride_1", "filter_by_query_len"],
+)
 @triton.jit
 def kernel_paged_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]

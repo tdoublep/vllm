@@ -26,6 +26,8 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
+import time
+
 logger = init_logger(__name__)
 
 
@@ -112,6 +114,9 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
+        self.t_last = None
+        self.save = None
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -123,6 +128,13 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+
+        if self.t_last is None:
+            self.t_last = time.time()
+        else:
+            t_elap = time.time()-self.t_last
+            print(self.save, ";", t_elap)
+            self.t_last = time.time()
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -166,6 +178,9 @@ class Scheduler(SchedulerInterface):
                     self.scheduler_config.long_prefill_token_threshold)
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
+
+            #print("num_new_tokens:      ", num_new_tokens)
+            #print("num_computed_tokens: ", request.num_computed_tokens)
 
             # Schedule encoder inputs.
             if request.has_encoder_inputs:
@@ -307,6 +322,9 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
+                #print("num_new_tokens:      ", num_new_tokens)
+                #print("num_computed_tokens: ", num_computed_tokens)
+
                 # Schedule encoder inputs.
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
@@ -447,6 +465,9 @@ class Scheduler(SchedulerInterface):
             self.requests[req_id].num_computed_tokens += num_scheduled_token
 
         self.finished_req_ids = set()
+
+        self.save = list(num_scheduled_tokens.values())
+
         return scheduler_output
 
     def _make_cached_request_data(
