@@ -191,7 +191,7 @@ def kernel_unified_attention_2d(
         else:
             V = V_load
 
-        seq_offset = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        seq_offset = start_n + tl.arange(0, BLOCK_N)
 
         seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
