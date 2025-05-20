@@ -48,6 +48,7 @@ def kernel_unified_attention_2d(
     output_stride_0: tl.int64,  # int
     output_stride_1: tl.int64,  # int, should be equal to head_size
     BLOCK_SIZE: tl.constexpr,  # int
+    BLOCK_N: tl.constexpr, # int
     HEAD_SIZE: tl.constexpr,  # int
     HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
@@ -138,24 +139,31 @@ def kernel_unified_attention_2d(
                               mask=query_mask_1,
                               other=0.0)
 
-    num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
+    #num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
+
+    offs_n = tl.arange(0, BLOCK_N)
 
     # iterate through tiles
-    for j in range(0, num_blocks):
+    for start_n in range(0, seq_len, BLOCK_N):
 
-        physical_block_idx = tl.load(block_tables_ptr + block_table_offset + j)
+        start_n = tl.multiple_of(start_n, BLOCK_N)
 
-        offs_n = tl.arange(0, BLOCK_SIZE)
 
-        v_offset = (physical_block_idx * stride_v_cache_0 +
+        physical_block_idx = tl.load(
+            block_tables_ptr + block_table_offset + (start_n + offs_n) // BLOCK_SIZE,
+            mask = (start_n + offs_n) < seq_len,
+            other=0
+        )
+
+        v_offset = (physical_block_idx[:, None] * stride_v_cache_0 +
                     kv_head_idx * stride_v_cache_2 +
                     offs_d[None, :] * stride_v_cache_3 +
-                    offs_n[:, None] * stride_v_cache_1)
+                    (offs_n[:, None] % BLOCK_SIZE) * stride_v_cache_1)
 
-        k_offset = (physical_block_idx * stride_k_cache_0 +
+        k_offset = (physical_block_idx[None, :] * stride_k_cache_0 +
                     kv_head_idx * stride_k_cache_2 +
                     offs_d[:, None] * stride_k_cache_3 +
-                    offs_n[None, :] * stride_k_cache_1)
+                    (offs_n[None, :] % BLOCK_SIZE) * stride_k_cache_1)
 
         # K : (HEAD_SIZE, BLOCK_SIZE)
         K_load = tl.load(key_cache_ptr + k_offset,
@@ -183,12 +191,12 @@ def kernel_unified_attention_2d(
         else:
             V = V_load
 
-        seq_offset = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        seq_offset = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
         seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
 
-        # S : (BLOCK_Q * num_queries_per_kv, BLOCK_SIZE,)
-        S = tl.zeros(shape=(BLOCK_Q * num_queries_per_kv, BLOCK_SIZE),
+        # S : (BLOCK_Q * num_queries_per_kv, BLOCK_N,)
+        S = tl.zeros(shape=(BLOCK_Q * num_queries_per_kv, BLOCK_N),
                      dtype=tl.float32)
 
         S += scale * tl.dot(Q, K)
@@ -213,7 +221,7 @@ def kernel_unified_attention_2d(
         # the entire row. In this case we need to set m_j 0 to avoid NaN
         m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
 
-        # P : (BLOCK_Q * num_queries_per_kv, BLOCK_SIZE,)
+        # P : (BLOCK_Q * num_queries_per_kv, BLOCK_N,)
         P = tl.exp(S - m_j[:, None])
 
         # l_j : (BLOCK_Q * num_queries_per_kv,)
@@ -222,14 +230,14 @@ def kernel_unified_attention_2d(
         # alpha : (BLOCK_Q * num_queries_per_kv, )
         alpha = tl.exp(M - m_j)
 
-        # acc : (BLOCK_Q * num_queries_per_kv, BLOCK_SIZE,)
+        # acc : (BLOCK_Q * num_queries_per_kv, BLOCK_N,)
         acc = acc * alpha[:, None]
 
         # update constants
         L = L * alpha + l_j
         M = m_j
 
-        # acc : (BLOCK_Q * num_queries_per_kv, BLOCK_SIZE,)
+        # acc : (BLOCK_Q * num_queries_per_kv, BLOCK_N,)
         acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
@@ -281,7 +289,7 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = 16
+    BLOCK_M = 32
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
@@ -318,6 +326,7 @@ def unified_attention(
         output_stride_0=out.stride(0),
         output_stride_1=out.stride(1),
         BLOCK_SIZE=block_size,
+        BLOCK_N=32,
         HEAD_SIZE=head_size,
         HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
         USE_ALIBI_SLOPES=use_alibi_slopes,
