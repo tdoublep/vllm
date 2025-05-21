@@ -31,10 +31,11 @@ configs = []
 for m in [16, 32, 64, 128, 256]:
     for n in [16, 32, 64, 128, 256]:
         configs.append(
-            triton.Config(
-                kwargs={'BLOCK_M': m, 'BLOCK_N': n, 'num_unroll_cache': None},
-            )
-        )
+            triton.Config(kwargs={
+                'BLOCK_M': m,
+                'BLOCK_N': n,
+                'num_unroll_cache': None
+            }, ))
 
 
 @triton.autotune(configs=configs, key=["tpa_test1", "tpa_test2"])
@@ -161,7 +162,10 @@ def kernel_unified_attention_2d(
     offs_n = tl.arange(0, BLOCK_N)
 
     # iterate through tiles
-    for start_n in range(0, seq_len, BLOCK_N, loop_unroll_factor=num_unroll_cache):
+    for start_n in range(0,
+                         seq_len,
+                         BLOCK_N,
+                         loop_unroll_factor=num_unroll_cache):
 
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
