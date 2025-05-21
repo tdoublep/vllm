@@ -26,19 +26,18 @@ def apply_softcap(S, x):
     p2 = tl.exp(-Sdiv)
     return x * (p1 - p2) / (p1 + p2)
 
+
 configs = []
-for m in [16,32,64,128]:
-    for n in [16,32,64,128]:
+for m in [16, 32, 64, 128, 256]:
+    for n in [16, 32, 64, 128, 256]:
         configs.append(
             triton.Config(
-                kwargs={'BLOCK_M': m, 'BLOCK_N': n},
+                kwargs={'BLOCK_M': m, 'BLOCK_N': n, 'num_unroll_cache': None},
             )
         )
 
-@triton.autotune(
-    configs=configs,
-   key=["tpa_test1","tpa_test2","tpa_test3"]
-)
+
+@triton.autotune(configs=configs, key=["tpa_test1", "tpa_test2"])
 @triton.jit
 def kernel_unified_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -80,6 +79,7 @@ def kernel_unified_attention_2d(
     tpa_test3: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    num_unroll_cache: tl.constexpr,
 ):
 
     q_block_global_idx = tl.program_id(0)
@@ -161,16 +161,14 @@ def kernel_unified_attention_2d(
     offs_n = tl.arange(0, BLOCK_N)
 
     # iterate through tiles
-    for start_n in range(0, seq_len, BLOCK_N):
+    for start_n in range(0, seq_len, BLOCK_N, loop_unroll_factor=num_unroll_cache):
 
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
-
-        physical_block_idx = tl.load(
-            block_tables_ptr + block_table_offset + (start_n + offs_n) // BLOCK_SIZE,
-            mask = (start_n + offs_n) < seq_len,
-            other=0
-        )
+        physical_block_idx = tl.load(block_tables_ptr + block_table_offset +
+                                     (start_n + offs_n) // BLOCK_SIZE,
+                                     mask=(start_n + offs_n) < seq_len,
+                                     other=0)
 
         v_offset = (physical_block_idx[:, None] * stride_v_cache_0 +
                     kv_head_idx * stride_v_cache_2 +
@@ -320,14 +318,10 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     # total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    grid = lambda META : (
-        q.shape[0] // (META["BLOCK_M"] // num_queries_per_kv) + num_seqs,
-        num_kv_heads
-    )
+    grid = lambda META: (q.shape[0] // (META["BLOCK_M"] // num_queries_per_kv)
+                         + num_seqs, num_kv_heads)
 
-    kernel_unified_attention_2d[
-        grid
-    ](
+    kernel_unified_attention_2d[grid](
         output_ptr=out,
         query_ptr=q,
         key_cache_ptr=k,
