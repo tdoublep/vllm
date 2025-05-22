@@ -338,25 +338,28 @@ def unified_attention(
     tpa_test_q = triton.next_power_of_2(int(max_seqlen_q))
     tpa_test_k = triton.next_power_of_2(int(max_seqlen_k))
 
-    '''
+
     # Model trained on max
-    if tpa_test_q < 528:
+    if tpa_test_q < 1024:
         BLOCK_M = 16
     else:
         BLOCK_M = 64
 
-    if tpa_test_k <= 24:
+    if tpa_test_k < 32:
         BLOCK_N = 16
     else:
-        if tpa_test_q  <= 16.50:
+        if tpa_test_q  < 32:
             BLOCK_N = 128
         else:
             BLOCK_N = 32
+
+
     '''
     m_factor = 1 if tpa_test_q < 1024 else 4
 
     BLOCK_M : tl.constexpr = 16 * m_factor
     BLOCK_N : tl.constexpr = max(16, min(tpa_test_k, 128) // m_factor)
+    '''
 
     #grid = lambda META : (q.shape[0] // (META['BLOCK_M'] // num_queries_per_kv)
     # 3    + num_seqs, num_kv_heads)
