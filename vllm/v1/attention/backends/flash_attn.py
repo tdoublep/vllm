@@ -88,6 +88,9 @@ class FlashAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
+    avg_query_len: int
+    avg_seq_len: int
+
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
@@ -328,6 +331,10 @@ class FlashAttentionMetadataBuilder:
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
+
+        avg_seq_len = int(self.runner.seq_lens_np[:num_reqs].sum())
+        avg_query_len = int(self.runner.query_start_loc_np[num_reqs])
+
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
 
@@ -463,6 +470,8 @@ class FlashAttentionMetadataBuilder:
             suffix_kv_lens=suffix_kv_lens,
             local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            avg_query_len=avg_query_len,
+            avg_seq_len=avg_seq_len,
         )
         return attn_metadata
 

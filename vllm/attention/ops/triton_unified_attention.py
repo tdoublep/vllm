@@ -28,8 +28,8 @@ def apply_softcap(S, x):
 
 
 configs = []
-for m in [16, 32, 64, 128, 256]:
-    for n in [16, 32, 64, 128, 256]:
+for m in [16, 32, 64, 128]:
+    for n in [16, 32, 64, 128]:
         configs.append(
             triton.Config(kwargs={
                 'BLOCK_M': m,
@@ -38,7 +38,7 @@ for m in [16, 32, 64, 128, 256]:
             }, ))
 
 
-@triton.autotune(configs=configs, key=["tpa_test1", "tpa_test2"])
+#@triton.autotune(configs=configs, key=["tpa_test1", "tpa_test2"])
 @triton.jit
 def kernel_unified_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -75,12 +75,8 @@ def kernel_unified_attention_2d(
     stride_v_cache_3: tl.constexpr,  # int
     query_start_len_ptr,  # [num_seqs+1]
     num_seqs: tl.int32,
-    tpa_test1: tl.constexpr,
-    tpa_test2: tl.constexpr,
-    tpa_test3: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    num_unroll_cache: tl.constexpr,
 ):
 
     q_block_global_idx = tl.program_id(0)
@@ -164,8 +160,7 @@ def kernel_unified_attention_2d(
     # iterate through tiles
     for start_n in range(0,
                          seq_len,
-                         BLOCK_N,
-                         loop_unroll_factor=num_unroll_cache):
+                         BLOCK_N):
 
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
@@ -282,6 +277,8 @@ def unified_attention(
     max_seqlen_q,
     seqused_k,
     max_seqlen_k,
+    avg_seqlen_q,
+    avg_seqlen_k,
     softmax_scale,
     causal,
     window_size,
@@ -322,8 +319,11 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     # total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    grid = lambda META: (q.shape[0] // (META["BLOCK_M"] // num_queries_per_kv)
-                         + num_seqs, num_kv_heads)
+    BLOCK_M = 64 if avg_seqlen_q > 2048 else 16
+    BLOCK_N = 64 if avg_seqlen_q > 2048 else 16
+
+    grid = (q.shape[0] // (BLOCK_M // num_queries_per_kv)
+        + num_seqs, num_kv_heads)
 
     kernel_unified_attention_2d[grid](
         output_ptr=out,
@@ -360,7 +360,6 @@ def unified_attention(
         stride_v_cache_3=v.stride(3),
         query_start_len_ptr=cu_seqlens_q,
         num_seqs=num_seqs,
-        tpa_test1=triton.next_power_of_2(max_seqlen_q),
-        tpa_test2=triton.next_power_of_2(max_seqlen_k),
-        tpa_test3=triton.next_power_of_2(num_seqs),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
     )

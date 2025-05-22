@@ -232,6 +232,8 @@ class TritonAttentionImpl(AttentionImpl):
             max_seqlen_q = attn_metadata.max_query_len
             max_seqlen_k = attn_metadata.max_seq_len
             block_table = attn_metadata.block_table
+            avg_seqlen_q = attn_metadata.avg_query_len
+            avg_seqlen_k = attn_metadata.avg_seq_len
 
         if use_prefill_decode_attn:
             # Compute attention and update output up to `num_actual_tokens`.
@@ -265,6 +267,8 @@ class TritonAttentionImpl(AttentionImpl):
                 max_seqlen_q=max_seqlen_q,
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
+                avg_seqlen_q=avg_seqlen_q,
+                avg_seqlen_k=avg_seqlen_k,
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
