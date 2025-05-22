@@ -34,11 +34,10 @@ for m in [16, 32, 64, 128]:
             triton.Config(kwargs={
                 'BLOCK_M': m,
                 'BLOCK_N': n,
-                'num_unroll_cache': None
             }, ))
 
 
-#@triton.autotune(configs=configs, key=["tpa_test1", "tpa_test2"])
+#@triton.autotune(configs=configs, key=["tpa_test_q", "tpa_test_k"])
 @triton.jit
 def kernel_unified_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -75,6 +74,8 @@ def kernel_unified_attention_2d(
     stride_v_cache_3: tl.constexpr,  # int
     query_start_len_ptr,  # [num_seqs+1]
     num_seqs: tl.int32,
+    tpa_test_q: tl.constexpr,
+    tpa_test_k: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -319,7 +320,7 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     # total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-
+    '''
     BLOCK_M = 16 if avg_seqlen_q < 8 else (16 if avg_seqlen_k < 128 else 64)
 
     if avg_seqlen_q < 8:
@@ -332,6 +333,33 @@ def unified_attention(
             BLOCK_N = 16
         else:
             BLOCK_N = 32
+    '''
+
+    tpa_test_q = triton.next_power_of_2(int(max_seqlen_q))
+    tpa_test_k = triton.next_power_of_2(int(max_seqlen_k))
+
+    '''
+    # Model trained on max
+    if tpa_test_q < 528:
+        BLOCK_M = 16
+    else:
+        BLOCK_M = 64
+
+    if tpa_test_k <= 24:
+        BLOCK_N = 16
+    else:
+        if tpa_test_q  <= 16.50:
+            BLOCK_N = 128
+        else:
+            BLOCK_N = 32
+    '''
+    m_factor = 1 if tpa_test_q < 1024 else 4
+
+    BLOCK_M : tl.constexpr = 16 * m_factor
+    BLOCK_N : tl.constexpr = max(16, min(tpa_test_k, 128) // m_factor)
+
+    #grid = lambda META : (q.shape[0] // (META['BLOCK_M'] // num_queries_per_kv)
+    # 3    + num_seqs, num_kv_heads)
 
     grid = (q.shape[0] // (BLOCK_M // num_queries_per_kv)
         + num_seqs, num_kv_heads)
@@ -371,6 +399,8 @@ def unified_attention(
         stride_v_cache_3=v.stride(3),
         query_start_len_ptr=cu_seqlens_q,
         num_seqs=num_seqs,
+        tpa_test_q=tpa_test_q,
+        tpa_test_k=tpa_test_k,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
     )
