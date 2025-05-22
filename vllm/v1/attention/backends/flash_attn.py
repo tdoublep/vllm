@@ -332,8 +332,8 @@ class FlashAttentionMetadataBuilder:
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
 
-        avg_seq_len = int(self.runner.seq_lens_np[:num_reqs].sum())
-        avg_query_len = int(self.runner.query_start_loc_np[num_reqs])
+        avg_seq_len = int(self.runner.seq_lens_np[:num_reqs].mean())
+        avg_query_len = int(self.runner.query_start_loc_np[num_reqs]/num_reqs)
 
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]

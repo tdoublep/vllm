@@ -319,8 +319,19 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     # total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    BLOCK_M = 64 if avg_seqlen_q > 2048 else 16
-    BLOCK_N = 64 if avg_seqlen_q > 2048 else 16
+
+    BLOCK_M = 16 if avg_seqlen_q < 8 else (16 if avg_seqlen_k < 128 else 64)
+
+    if avg_seqlen_q < 8:
+        if avg_seqlen_k < 64:
+            BLOCK_N = 16
+        else:
+            BLOCK_N = 128
+    else:
+        if avg_seqlen_k < 32:
+            BLOCK_N = 16
+        else:
+            BLOCK_N = 32
 
     grid = (q.shape[0] // (BLOCK_M // num_queries_per_kv)
         + num_seqs, num_kv_heads)
