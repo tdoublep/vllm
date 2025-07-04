@@ -3,10 +3,10 @@
 
 from typing import Optional
 
-import flashinfer
 import pytest
 import torch
 
+import flashinfer
 from vllm.platforms import current_platform
 
 NUM_HEADS = [(16, 16), (32, 8), (64, 8), (6, 1)]
