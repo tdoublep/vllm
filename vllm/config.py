@@ -4340,6 +4340,12 @@ class CompilationConfig:
             self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
+
+        self.splitting_ops = [
+            "vllm.unified_attention",
+            "vllm.unified_attention_with_output",
+        ]
+        '''
         # NOTE: this function needs to be called
         if self.splitting_ops and self.full_cuda_graph:
             raise ValueError("full_cuda_graph cannot be used together with "
@@ -4350,10 +4356,10 @@ class CompilationConfig:
             self.splitting_ops = [] if self.full_cuda_graph else [
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
-#                "vllm.mamba_mixer2",
+                "vllm.mamba_mixer2",
             ]
-            print("self.splitting_ops: ", self.splitting_ops)
-
+        '''
+        print("self.splitting_ops: ", self.splitting_ops)
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))

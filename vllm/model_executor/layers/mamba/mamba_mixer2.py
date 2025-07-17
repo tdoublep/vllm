@@ -463,7 +463,6 @@ class MambaMixer2(MambaBase, nn.Module):
         mup_vector: Optional[torch.Tensor] = None,
     ):
         forward_context = get_forward_context()
-
         # mamba2_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they
@@ -539,14 +538,12 @@ class MambaMixer2(MambaBase, nn.Module):
             out, _ = self.out_proj(hidden_states)
             return out
 
-
         num_prefills = attn_metadata.num_prefills  # request count
         num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
         num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
         num_actual_tokens = num_prefill_tokens + num_decodes
-
 
 
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
@@ -731,7 +728,6 @@ class MambaMixer2(MambaBase, nn.Module):
 
         # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)
-
         return out
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:

@@ -1296,7 +1296,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
-            print("using cuda graphs for num_input_tokens: ", num_input_tokens)
         else:
             # Eager mode.
             # Pad tokens to multiple of tensor_parallel_size when
