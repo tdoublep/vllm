@@ -732,7 +732,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
-        attention_cuda_graphs = all(
+        attention_cuda_graphs = any(
             b.can_run_in_cudagraph(common_attn_metadata)
             for b in self.attn_metadata_builders)
 
@@ -1289,12 +1289,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
          spec_decode_metadata,
          num_scheduled_tokens_np) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
+            print("using cuda graphs for num_input_tokens: ", num_input_tokens)
         else:
             # Eager mode.
             # Pad tokens to multiple of tensor_parallel_size when
@@ -1988,14 +1990,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
+                attn_metadata_builder = self.attn_metadata_builders[kv_cache_group_id]
+                if attn_metadata_builder.full_cudagraph_supported:
+                    attn_metadata_i = attn_metadata_builder.build_for_cudagraph_capture(
+                            common_attn_metadata)
+                    for layer_name in kv_cache_group_spec.layer_names:
+                        attn_metadata[layer_name] = attn_metadata_i
+                else:
+                    for layer_name in kv_cache_group_spec.layer_names:
+                        attn_metadata[layer_name] = None
 
-                attn_metadata_i = self.attn_metadata_builders[
-                    kv_cache_group_id].build_for_cudagraph_capture(
-                        common_attn_metadata)
-                for layer_name in kv_cache_group_spec.layer_names:
-                    attn_metadata[layer_name] = attn_metadata_i
-
-                print(attn_metadata[layer_name])
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -2350,7 +2354,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if (self.full_cuda_graph
                     and not attn_metadata_builder_i.full_cudagraph_supported):
-                raise ValueError(
+                logger.info(
                     f"Full CUDAGraph not supported for "
                     f"{attn_backend_i.__name__}. Turn off CompilationConfig."
                     f"full_cuda_graph or use a different attention backend.")

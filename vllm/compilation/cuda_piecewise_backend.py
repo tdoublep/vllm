@@ -106,6 +106,9 @@ class CUDAPiecewiseBackend:
             end_monitoring_torch_compile(self.vllm_config)
 
     def __call__(self, *args) -> Any:
+
+        print("__call__")
+
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()
@@ -141,8 +144,12 @@ class CUDAPiecewiseBackend:
         # Skip CUDA graphs if this entry doesn't use them OR
         # if we're supposed to skip them globally
         skip_cuda_graphs = get_forward_context().skip_cuda_graphs
+        print("skip_cuda_graphs: ", skip_cuda_graphs)
+
         if not entry.use_cudagraph or skip_cuda_graphs:
             return entry.runnable(*args)
+
+        print("actually use cuda graph")
 
         if entry.cudagraph is None:
             if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa

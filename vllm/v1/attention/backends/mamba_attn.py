@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, ClassVar
 
 import torch
 
@@ -86,6 +86,8 @@ class Mamba2AttentionMetadata:
 
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
+
+    full_cudagraph_supported: ClassVar[bool] = True
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: MambaSpec,
                  block_table: BlockTable):
@@ -222,3 +224,27 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor=state_indices_tensor,
         )
         return attn_metadata
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        return common_attn_metadata.max_query_len == 1
+
+    def build_for_cudagraph_capture(
+            self, common_attn_metadata: CommonAttentionMetadata):
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with MLA.
+        """
+        m = common_attn_metadata
+        assert m.num_reqs == m.num_actual_tokens, \
+            "MLA only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        m.max_query_len = 1  # decode-only
+
+        # Update state usually set in reorder_batch.
+        self._num_decodes = m.num_reqs
+        self._num_decode_tokens = m.num_actual_tokens
+        self._num_prefills = 0
+        self._num_prefill_tokens = 0
+        return self.build(0, m)

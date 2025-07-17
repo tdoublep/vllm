@@ -320,6 +320,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     def call_module(self, target: torch.fx.node.Target,
                     args: tuple[torch.fx.node.Argument,
                                 ...], kwargs: dict[str, Any]) -> Any:
+
+        print("call_module")
         assert isinstance(target, str)
         output = super().call_module(target, args, kwargs)
 
@@ -342,6 +344,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
             piecewise_backend = resolve_obj_by_qualname(
                 current_platform.get_piecewise_backend_cls())
+
             self.module.__dict__[target] = piecewise_backend(
                 submod, self.vllm_config, self.graph_pool, index,
                 len(self.compile_submod_names), sym_shape_indices,
