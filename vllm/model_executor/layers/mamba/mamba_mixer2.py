@@ -437,13 +437,15 @@ class MambaMixer2(MambaBase, nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        output: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
         mamba2_metadata: Mamba2Metadata,
         mup_vector: Optional[torch.Tensor] = None,
     ):
         if self.use_direct_call:
-            return self.forward_cuda(
+            self.forward_cuda(
                 hidden_states,
+                output,
                 mamba_cache_params,
                 mamba2_metadata,
                 mup_vector
@@ -451,6 +453,7 @@ class MambaMixer2(MambaBase, nn.Module):
         else:
             return torch.ops.vllm.mamba_mixer2(
                 hidden_states,
+                output,
                 self.prefix,
                 mup_vector,
             )
@@ -458,10 +461,12 @@ class MambaMixer2(MambaBase, nn.Module):
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
+        output: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
         mamba2_metadata: Mamba2Metadata,
         mup_vector: Optional[torch.Tensor] = None,
     ):
+
         forward_context = get_forward_context()
         # mamba2_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
@@ -551,11 +556,13 @@ class MambaMixer2(MambaBase, nn.Module):
         # Split along token dimension
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         if envs.VLLM_USE_V1:
+
             hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
                 hidden_states_B_C[:num_actual_tokens],
                 [num_decodes, num_prefill_tokens],
                 dim=0,
             )
+
             dt_d, dt_p = torch.split(
                 dt[:num_actual_tokens],
                 [num_decodes, num_prefill_tokens],
@@ -727,8 +734,7 @@ class MambaMixer2(MambaBase, nn.Module):
         hidden_states = self.norm(hidden_states, gate[:num_actual_tokens])
 
         # 5. Final linear projection
-        out, _ = self.out_proj(hidden_states)
-        return out
+        output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return get_mamba_state_shape(
@@ -744,13 +750,15 @@ class MambaMixer2(MambaBase, nn.Module):
 
 def mamba_mixer2(
     hidden_states: torch.Tensor,
+    output: torch.Tensor,
     layer_name: str,
     mup_vector: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    return self.forward_cuda(
+    self.forward_cuda(
         hidden_states=hidden_states,
+        output=output,
         mamba_cache_params=None,
         mamba2_metadata=None,
         mup_vector=mup_vector
@@ -758,15 +766,16 @@ def mamba_mixer2(
 
 def mamba_mixer2_fake(
     hidden_states: torch.Tensor,
+    output: torch.Tensor,
     layer_name: str,
     mup_vector: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    return torch.empty_like(hidden_states).contiguous()
+    return
 
 direct_register_custom_op(
     op_name="mamba_mixer2",
     op_func=mamba_mixer2,
-    mutates_args=[],
+    mutates_args=["output"],
     fake_impl=mamba_mixer2_fake,
     dispatch_key=current_platform.dispatch_key,
 )

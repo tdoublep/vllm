@@ -105,9 +105,10 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.mamba(hidden_states, mamba_cache_params,
+        output = torch.empty_like(hidden_states)
+        self.mamba(hidden_states, output, mamba_cache_params,
                                    mamba2_metadata)
-        hidden_states = residual + hidden_states * self.residual_multiplier
+        hidden_states = residual + output * self.residual_multiplier
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
