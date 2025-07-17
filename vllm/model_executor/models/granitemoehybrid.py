@@ -10,6 +10,7 @@ from torch import nn
 from transformers import GraniteMoeHybridConfig
 
 from vllm import envs
+from vllm.compilation.decorators import support_torch_compile
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -306,7 +307,7 @@ ALL_DECODER_LAYER_TYPES = {
     "mamba": GraniteMoeHybridMambaDecoderLayer,
 }
 
-
+@support_torch_compile
 class GraniteMoeHybridModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

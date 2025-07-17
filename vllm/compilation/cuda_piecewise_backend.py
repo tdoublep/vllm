@@ -58,6 +58,7 @@ class CUDAPiecewiseBackend:
         If a shape needs both compilation and cudagraph, we will
         compile it first, and then capture cudagraph.
         """
+        print("[CUDAPiecewiseBackend::__init__] hello world")
         self.graph = graph
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
