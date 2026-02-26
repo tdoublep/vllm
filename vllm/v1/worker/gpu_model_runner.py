@@ -1181,13 +1181,14 @@ class GPUModelRunner(
 
         # Find the number of accepted tokens for each sequence.
         # Keep on GPU to avoid sync point
+        num_reqs = output_token_ids.size(0)
         num_accepted_tokens_gpu = (
             (
                 torch.cat(
                     [
                         output_token_ids,
                         torch.full(
-                            (output_token_ids.size(0), 1),
+                            (num_reqs, 1),
                             -1,
                             device=output_token_ids.device,
                         ),
@@ -1199,13 +1200,16 @@ class GPUModelRunner(
             .int()
             .argmax(-1)
         )
-        
-        # Store GPU tensor for later use in _build_attention_metadata
-        self.input_batch.num_accepted_tokens_gpu = num_accepted_tokens_gpu
-        
+
+        self.num_accepted_tokens.gpu[:num_reqs].copy_(
+            num_accepted_tokens_gpu, non_blocking=True
+        )
+        self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
+
         # Only sync to CPU when mamba cache mode requires it
         if self.cache_config.mamba_cache_mode == "align":
-            num_accepted_tokens = num_accepted_tokens_gpu.cpu().numpy()
+            # NOTE (tdoublep): this causes a CPU-GPU sync that can affect performance
+            num_accepted_tokens = self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
             for i, num_tokens in enumerate(num_accepted_tokens):
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
             mamba_utils.postprocess_mamba(
@@ -1760,27 +1764,12 @@ class GPUModelRunner(
         else:
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
-        if use_spec_decode:
-            # Use GPU tensor directly if available (avoids sync)
-            if hasattr(self.input_batch, 'num_accepted_tokens_gpu') and \
-               self.input_batch.num_accepted_tokens_gpu is not None:
-                # Copy only the valid portion (min of both sizes)
-                gpu_tensor_size = self.input_batch.num_accepted_tokens_gpu.size(0)
-                copy_size = min(num_reqs, gpu_tensor_size)
-                self.num_accepted_tokens.gpu[:copy_size].copy_(
-                    self.input_batch.num_accepted_tokens_gpu[:copy_size],
-                    non_blocking=True
-                )
-                # Fill remaining with 1 if num_reqs > gpu_tensor_size
-                if num_reqs > copy_size:
-                    self.num_accepted_tokens.gpu[copy_size:num_reqs].fill_(1)
-            else:
-                # Fallback to CPU path if GPU tensor not available
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                )
-                self.num_accepted_tokens.copy_to_gpu()
-            self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
+        if use_spec_decode and self.cache_config.mamba_cache_mode == "align":
+            self.num_accepted_tokens.np[:num_reqs] = (
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            )
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
