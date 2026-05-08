@@ -1524,13 +1524,14 @@ class GPUModelRunner(
                     mamba_copy_funcs,
                 )
 
-            # Get the mamba block table (use first mamba group). NOTE 1: The
-            # code assumes all mamba groups share the same block table mapping
-            # as in mamba_utils get_mamba_groups(..)
-            mamba_group_id = ctx.mamba_group_ids[0]
-            block_table_gpu = self.input_batch.block_table[
-                mamba_group_id
-            ].get_device_tensor(num_reqs)
+            # Stack block tables from all mamba groups. Each group has
+            # independently allocated physical blocks.
+            block_table_gpu = torch.stack(
+                [
+                    self.input_batch.block_table[gid].get_device_tensor(num_reqs)
+                    for gid in ctx.mamba_group_ids
+                ]
+            )  # [num_groups, num_reqs, max_blocks]
 
             # Run fused GPU postprocess.
             ctx.run_fused_postprocess(

@@ -30,9 +30,10 @@ def postprocess_mamba_fused_kernel(
     num_scheduled_tokens_ptr,
     num_computed_tokens_ptr,
     num_draft_tokens_ptr,
-    # Block table (per-request, per-block) - shape [max_reqs, max_blocks]
+    # Block table - shape [num_groups, max_reqs, max_blocks]
     block_table_ptr,
-    block_table_stride_req: tl.int64,  # stride between requests
+    block_table_stride_group: tl.int64,  # stride between groups (in elements)
+    block_table_stride_req: tl.int64,  # stride between requests (in elements)
     # Mamba state metadata (per-layer, per-state-type)
     # These are 1D arrays indexed by (layer_idx * num_state_types + state_type_idx)
     state_base_addrs_ptr,  # base address of each state tensor
@@ -40,6 +41,7 @@ def postprocess_mamba_fused_kernel(
     state_elem_sizes_ptr,  # element size for each state
     state_inner_sizes_ptr,  # number of elements in inner dimensions
     state_conv_widths_ptr,  # conv width for conv states (0 for temporal)
+    state_group_indices_ptr,  # maps state_idx to group index in block table
     # Output: num_accepted_tokens update (for src==dst case)
     num_accepted_tokens_out_ptr,
     # Runtime parameter (varies per batch - NOT constexpr to avoid recompilation)
@@ -96,6 +98,11 @@ def postprocess_mamba_fused_kernel(
     state_inner_size = tl.load(state_inner_sizes_ptr + state_idx)
     conv_width = tl.load(state_conv_widths_ptr + state_idx)
 
+    # Load the group index for this state, then index into the correct
+    # group's block table. Each mamba group has independently allocated
+    # physical blocks.
+    group_idx = tl.load(state_group_indices_ptr + state_idx).to(tl.int64)
+
     # Load block IDs from block table. Cast to typed pointer BEFORE arithmetic
     # to ensure element-wise (not byte-wise) pointer advancement.
     # Promote loaded block ids to int64 *before* multiplying with the int64
@@ -105,7 +112,11 @@ def postprocess_mamba_fused_kernel(
     # the product once block_id * stride exceeds 2**31 and producing a
     # wrong src/dst address for large mamba caches.
     block_table_typed = block_table_ptr.to(tl.pointer_type(tl.int32))
-    block_table_base = block_table_typed + req_idx * block_table_stride_req
+    block_table_base = (
+        block_table_typed
+        + group_idx * block_table_stride_group
+        + req_idx * block_table_stride_req
+    )
     src_block_id = tl.load(block_table_base + src_block_idx).to(tl.int64)
     dest_block_id = tl.load(block_table_base + dest_block_idx).to(tl.int64)
 
@@ -258,12 +269,14 @@ class MambaGPUContext:
     state_elem_sizes: torch.Tensor  # int32: element size in bytes
     state_inner_sizes: torch.Tensor  # int64: elements in inner dimensions
     state_conv_widths: torch.Tensor  # int32: conv width (0 for temporal states)
+    state_group_indices: torch.Tensor  # int32: maps state_idx to group index
 
     # Configuration
     block_size: int
     num_layers: int
     num_state_types: int
     mamba_group_ids: list[int]
+    num_groups: int
 
     # Output buffer for num_accepted_tokens updates
     num_accepted_tokens_out: torch.Tensor
@@ -305,10 +318,14 @@ class MambaGPUContext:
             state_conv_widths=torch.zeros(
                 total_states, dtype=torch.int32, device=device
             ),
+            state_group_indices=torch.zeros(
+                total_states, dtype=torch.int32, device=device
+            ),
             block_size=mamba_spec.block_size,
             num_layers=num_layers,
             num_state_types=num_state_types,
             mamba_group_ids=mamba_group_ids,
+            num_groups=len(mamba_group_ids),
             num_accepted_tokens_out=torch.zeros(
                 max_num_reqs, dtype=torch.int32, device=device
             ),
@@ -365,7 +382,7 @@ class MambaGPUContext:
             return
 
         idx = 0
-        for mamba_group_id in self.mamba_group_ids:
+        for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
             layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
             for layer_name in layer_names:
                 attention = forward_context[layer_name]
@@ -417,6 +434,7 @@ class MambaGPUContext:
                             state[0].numel() if state.dim() > 1 else 1
                         )
 
+                    self.state_group_indices[idx] = group_local_idx
                     idx += 1
 
         self.is_initialized = True
@@ -444,7 +462,8 @@ class MambaGPUContext:
             num_scheduled_tokens_gpu: [num_reqs] scheduled token counts
             num_computed_tokens_gpu: [num_reqs] computed token counts
             num_draft_tokens_gpu: [num_reqs] draft token counts
-            block_table_gpu: [max_reqs, max_blocks] block IDs per request
+            block_table_gpu: [num_groups, num_reqs, max_blocks] block IDs
+                per group per request
         """
         if num_reqs == 0 or not self.is_initialized:
             return
@@ -465,11 +484,13 @@ class MambaGPUContext:
             num_draft_tokens_gpu,
             block_table_gpu,
             block_table_gpu.stride(0),
+            block_table_gpu.stride(1),
             self.state_base_addrs,
             self.state_block_strides,
             self.state_elem_sizes,
             self.state_inner_sizes,
             self.state_conv_widths,
+            self.state_group_indices,
             self.num_accepted_tokens_out,
             num_reqs,
             block_size=self.block_size,
