@@ -5292,7 +5292,14 @@ class GPUModelRunner(
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
             compilation_counter.stock_torch_compile_count += 1
             self.model.compile(fullgraph=True, backend=backend)
-            return
+            # Stock torch.compile normally leaves cudagraph handling to the
+            # backend / user. The exception is breakable cudagraphs: the
+            # BreakableCUDAGraphWrapper is an outer wrapper that drives
+            # capture/replay through the compiled callable, with attention
+            # custom ops triggering eager breaks at dispatcher time. Fall
+            # through to install the wrapper in that case.
+            if not is_breakable_cudagraph_enabled():
+                return
         # for other compilation modes, cudagraph behavior is controlled by
         # CudagraphWrapper and CudagraphDispatcher of vllm.
 
