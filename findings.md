@@ -143,13 +143,13 @@ Smoke test: `Qwen/Qwen2-1.5B-Instruct`, single-GPU H100, greedy
 decode, prompt `"Hello, my name is"`, `max_tokens=16`.
 
 | Configuration | Output |
-|---|---|
-| `mode=VLLM_COMPILE`, breakable off (baseline piecewise) | ` John and I am a 2017 graduate of the University of South` |
-| `mode=VLLM_COMPILE`, breakable on (this patch) | ` John and I am a 2017 graduate of the University of South` |
+| --- | --- |
+| `mode=VLLM_COMPILE`, breakable off (baseline piecewise) | `John and I am a 2017 graduate of the University of South` |
+| `mode=VLLM_COMPILE`, breakable on (this patch) | `John and I am a 2017 graduate of the University of South` |
 
 Output bytes are identical. Compile and capture both ran:
 
-```
+```text
 INFO breakable_cudagraph.py:288 Breakable CUDA graph enabled
 INFO backends.py:1153 Dynamo bytecode transform time: 3.55 s
 INFO backends.py:393 Compiling a graph for compile range (1, 16384) takes 5.59 s
@@ -216,7 +216,137 @@ opportunities pay off is empirical and likely model-dependent.
   whether breakable + Inductor is faster or slower than
   piecewise + Inductor on real workloads is a separate measurement.
 
-## Full diff
+## Follow-up: stock `torch.compile` + breakable
+
+The same investigation extended to `CompilationMode.STOCK_TORCH_COMPILE`
+(mode=1), where `vllm.model.compile(fullgraph=True, backend=...)` is
+called directly with no `VllmBackend`, no FX splitting at attention,
+no custom passes, and no per-region cudagraph wrapping. The
+resulting compiled model is a single Inductor graph whose attention
+calls go through `torch.ops.vllm.unified_attention_with_output` (an
+opaque custom op).
+
+This combination was disabled by a single early `return` in
+`gpu_model_runner.py:5295` that ran the `model.compile()` and then
+exited before any cudagraph wrapper could be installed.
+
+### Why it composes
+
+The `@eager_break_during_capture` decorator wraps the registered
+Python implementation of the attention custom op. Inductor cannot
+inline `torch.ops.vllm.unified_attention_with_output` — custom ops
+are opaque to the compiler — so at execution time the decorated
+function still runs, sees the active `BreakableCUDAGraphCapture`,
+and ends the segment as before. The capture mechanism only requires
+an outer wrapper around the (now compiled) callable and an opaque
+attention op at its break boundaries; neither requirement depends
+on FX splitting.
+
+### Patch
+
+Single change in `vllm/v1/worker/gpu_model_runner.py`: stop
+returning unconditionally after `self.model.compile(...)` in
+stock-torch-compile mode. Fall through when breakable is enabled so
+the `BreakableCUDAGraphWrapper` wraps the compiled model.
+
+```python
+self.model.compile(fullgraph=True, backend=backend)
+if not is_breakable_cudagraph_enabled():
+    return
+# else: fall through to BreakableCUDAGraphWrapper path below
+```
+
+`nn.Module.compile()` mutates `_call_impl` in place, so the
+outer wrapper naturally drives capture/replay through the compiled
+callable.
+
+### Verification
+
+Same smoke test: `Qwen/Qwen2-1.5B-Instruct`, single H100, greedy
+decode, prompt `"Hello, my name is"`, `max_tokens=16`.
+
+| Configuration | Output |
+| --- | --- |
+| `mode=VLLM_COMPILE` + breakable (prior patch, anchor) | `John and I am a 2017 graduate of the University of South` |
+| `mode=STOCK_TORCH_COMPILE`, breakable off | `John and I am a 2017 graduate of the University of South` |
+| `mode=STOCK_TORCH_COMPILE` + breakable (this patch) | `John and I am a 2017 graduate of the University of South` |
+
+All three produce byte-identical output (same text, same token IDs).
+The new path runs Dynamo + Inductor and captures both PIECEWISE
+(mixed prefill-decode) and FULL (uniform decode, FA3) cudagraphs
+under the breakable wrapper:
+
+```text
+INFO breakable_cudagraph.py:288 Breakable CUDA graph enabled
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|...| 51/51
+Capturing CUDA graphs (decode, FULL): 100%|...| 51/51
+```
+
+Stock-torch-compile alone, in contrast, skips cudagraph capture
+entirely: `WARNING ... Skipping CUDA graph capture. To turn on
+CUDA graph capture, ensure cudagraph_mode was not manually set
+to NONE.` That message is misleading — `cudagraph_mode` is at its
+default `FULL_AND_PIECEWISE`; what's really happening is that
+stock-mode has no path to wrap the model, so cudagraph capture
+never starts. Breakable supplies the missing wrapper.
+
+The existing `vllm.py:1113` warning `"Inductor compilation was
+disabled by user settings, optimizations settings that are only
+active during inductor compilation will be ignored"` fires for
+both stock configurations. It refers to vLLM-specific Inductor
+pass config (custom passes, fusion) gated on `mode=VLLM_COMPILE`.
+Stock Inductor is still active and lowering the model into Triton.
+
+### Recommended usage
+
+```bash
+VLLM_USE_BREAKABLE_CUDAGRAPH=1 vllm serve <model> -O.mode=1
+```
+
+Or via `LLM(...)`:
+
+```python
+from vllm.config import CompilationConfig, CompilationMode
+
+LLM(
+    model=...,
+    compilation_config=CompilationConfig(
+        mode=CompilationMode.STOCK_TORCH_COMPILE
+    ),
+)
+# with VLLM_USE_BREAKABLE_CUDAGRAPH=1 in the environment
+```
+
+Notes:
+
+- Stock mode keeps Dynamo guards (`wrapper.py:105` short-circuits
+  guard removal for `STOCK_TORCH_COMPILE`). Mark dynamic dims and
+  pre-warm cudagraph sizes the way the rest of vLLM does to avoid
+  guard-triggered recompilation.
+- vLLM's custom Inductor passes (RMSNorm/quant fusion, SP, async
+  TP, fused attention quant) do not run in stock mode. If you need
+  those, stay on `mode=VLLM_COMPILE`. Stock mode is interesting as
+  a low-overhead reference path, not as a feature-parity replacement.
+- Initialization time differed noticeably between the two paths
+  on Qwen2-1.5B; some of that is vLLM's per-region Inductor
+  compilation in `VLLM_COMPILE` mode, but the stock path defers
+  the single-graph Inductor lowering into cudagraph capture, so
+  the timings are not directly comparable. Steady-state inference
+  performance is a separate experiment.
+
+### What was not investigated (stock path)
+
+- **Recompilation under variable batch sizes.** Stock mode keeps
+  guards. Without explicit `mark_dynamic` on batch dims the way
+  `@support_torch_compile` does, varying batch sizes could trigger
+  Dynamo to retrace.
+- **Backends other than `"inductor"`.** Stock mode accepts any
+  backend in `torch._dynamo.backends.registry`; only inductor was
+  exercised.
+- **Larger models, TP > 1, speculative decoding** — same caveats
+  as for `VLLM_COMPILE` + breakable.
+
+## VLLM_COMPILE patch diff
 
 ```diff
 diff --git a/vllm/compilation/backends.py b/vllm/compilation/backends.py
@@ -258,4 +388,27 @@ index ba7d26c93..30b807817 100644
 +                "compilation mode, defaulting to -cc.mode=none."
              )
              self.compilation_config.mode = CompilationMode.NONE
+```
+
+## STOCK_TORCH_COMPILE patch diff
+
+```diff
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -5292,7 +5292,14 @@ class GPUModelRunner(
+             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
+             compilation_counter.stock_torch_compile_count += 1
+             self.model.compile(fullgraph=True, backend=backend)
+-            return
++            # Stock torch.compile normally leaves cudagraph handling to the
++            # backend / user. The exception is breakable cudagraphs: the
++            # BreakableCUDAGraphWrapper is an outer wrapper that drives
++            # capture/replay through the compiled callable, with attention
++            # custom ops triggering eager breaks at dispatcher time. Fall
++            # through to install the wrapper in that case.
++            if not is_breakable_cudagraph_enabled():
++                return
+         # for other compilation modes, cudagraph behavior is controlled by
+         # CudagraphWrapper and CudagraphDispatcher of vllm.
 ```
