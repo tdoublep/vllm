@@ -647,9 +647,14 @@ def wrap_with_cudagraph_if_needed(
     Returns:
         The wrapped backend if CUDA graphs are enabled, otherwise the original backend
     """
+    from vllm.compilation.breakable_cudagraph import (
+        is_breakable_cudagraph_enabled,
+    )
+
     if (
         not compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
         or compilation_config.use_inductor_graph_partition
+        or is_breakable_cudagraph_enabled()
     ):
         return piecewise_backend
 

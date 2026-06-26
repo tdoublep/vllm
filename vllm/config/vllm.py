@@ -1096,10 +1096,13 @@ class VllmConfig:
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
-        if envs.VLLM_USE_BREAKABLE_CUDAGRAPH:
+        if envs.VLLM_USE_BREAKABLE_CUDAGRAPH and self.compilation_config.mode in (
+            None,
+            CompilationMode.NONE,
+        ):
             logger.warning_once(
-                "VLLM_USE_BREAKABLE_CUDAGRAPH is set, disabling vLLM's "
-                "torch.compile pipeline. Equivalent to -cc.mode=none."
+                "VLLM_USE_BREAKABLE_CUDAGRAPH is set with no explicit "
+                "compilation mode, defaulting to -cc.mode=none."
             )
             self.compilation_config.mode = CompilationMode.NONE
 
